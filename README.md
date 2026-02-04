@@ -92,7 +92,7 @@ jupyter notebook model_training.ipynb
 ## Project Structure
 
 ```
-bobadehelp/
+PYSpark/
 ├── data/hnm/raw/              # Input CSV files
 ├── pyspark_*.py               # PySpark pipeline scripts
 ├── run_training.py            # Sklearn training
