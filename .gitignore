@@ -1,0 +1,61 @@
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Data files (too large for git)
+*.zip
+*.csv
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets/tokens
+token.txt
+*.key
+*.pem
+.env
+
+# PySpark
+metastore_db/
+derby.log
+spark-warehouse/
+
+# Model outputs (large binary files)
+*.pkl
+*.joblib
+*.model
