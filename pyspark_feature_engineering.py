@@ -13,10 +13,10 @@ import os
 print("Initializing Spark Session...")
 spark = SparkSession.builder \
     .appName("HnM_Feature_Engineering") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
-    .config("spark.driver.maxResultSize", "4g") \
-    .config("spark.sql.shuffle.partitions", "100") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.maxResultSize", "2g") \
+    .config("spark.sql.shuffle.partitions", "10") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -160,6 +160,46 @@ print(f"  Sampled: {transactions_sample.count():,} rows")
 print("\n2. Processing dates...")
 transactions_sample = transactions_sample \
     .withColumn("transaction_date", to_date(col("t_dat")))
+
+# ── Behavioral features from transaction history ──
+print("\n3. Creating behavioral features from transactions...")
+
+# Customer-level behavioral features
+cust_behavior = transactions_sample.groupBy("customer_id").agg(
+    count("*").alias("cust_total_purchases"),
+    countDistinct("article_id").alias("cust_unique_articles"),
+    avg("price").alias("cust_avg_price"),
+    sum("price").alias("cust_total_spend"),
+)
+cust_behavior = cust_behavior.withColumn(
+    "cust_purchase_diversity",
+    col("cust_unique_articles") / col("cust_total_purchases")
+)
+print(f"  ✓ Customer behavioral features: 5")
+
+# Article-level behavioral features
+art_behavior = transactions_sample.groupBy("article_id").agg(
+    count("*").alias("art_total_purchases"),
+    countDistinct("customer_id").alias("art_unique_buyers"),
+    avg("price").alias("art_avg_price"),
+)
+art_behavior = art_behavior.withColumn(
+    "art_repeat_buyer_ratio",
+    lit(1) - (col("art_unique_buyers") / col("art_total_purchases"))
+)
+print(f"  ✓ Article behavioral features: 4")
+
+# Merge behavioral features into customer and article features
+print("\n4. Merging behavioral features...")
+customers_features = customers_features.join(cust_behavior, on="customer_id", how="left")
+articles_features = articles_features.join(art_behavior, on="article_id", how="left")
+
+# Re-save with behavioral features
+print("\nRe-saving features with behavioral data...")
+articles_features.write.mode("overwrite").parquet(f"{FEATURES_PATH}/articles_features")
+print(f"✓ Updated {FEATURES_PATH}/articles_features/")
+customers_features.write.mode("overwrite").parquet(f"{FEATURES_PATH}/customers_features")
+print(f"✓ Updated {FEATURES_PATH}/customers_features/")
 
 # Save transactions sample
 print("\nSaving transactions sample...")

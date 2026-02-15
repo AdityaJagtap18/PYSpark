@@ -15,9 +15,10 @@ import os
 print("Initializing Spark Session...")
 spark = SparkSession.builder \
     .appName("HnM_Model_Training") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
-    .config("spark.driver.maxResultSize", "4g") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.maxResultSize", "2g") \
+    .config("spark.sql.shuffle.partitions", "10") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -84,15 +85,44 @@ data_assembled = assembler.transform(data_filled).select("features", "purchase_c
 # Rename target column
 data_final = data_assembled.withColumnRenamed("purchase_count", "label")
 
-# Split data
-print("\nSplitting train/test (80/20)...")
-train_data, test_data = data_final.randomSplit([0.8, 0.2], seed=42)
+# Stratified 3-way split: train (60%) / validation (20%) / test (20%)
+# Create strata bins based on purchase_count distribution
+print("\nCreating stratified train/validation/test split (60/20/20)...")
+data_final = data_final.withColumn(
+    "strata",
+    when(col("label") <= 1, lit(0))
+    .when(col("label") <= 2, lit(1))
+    .when(col("label") <= 5, lit(2))
+    .otherwise(lit(3))
+)
 
-print(f"✓ Train set: {train_data.count():,} rows")
-print(f"✓ Test set: {test_data.count():,} rows")
+# Compute per-stratum fractions for sampleBy
+# First split: 60% train
+train_data = data_final.sampleBy("strata", fractions={0: 0.6, 1: 0.6, 2: 0.6, 3: 0.6}, seed=42)
+remaining = data_final.subtract(train_data)
+
+# Second split: 50% of remaining -> 20% val, 20% test
+val_data = remaining.sampleBy("strata", fractions={0: 0.5, 1: 0.5, 2: 0.5, 3: 0.5}, seed=42)
+test_data = remaining.subtract(val_data)
+
+# Drop the strata column
+train_data = train_data.drop("strata")
+val_data = val_data.drop("strata")
+test_data = test_data.drop("strata")
+data_final = data_final.drop("strata")
+
+train_count = train_data.count()
+val_count = val_data.count()
+test_count = test_data.count()
+total = train_count + val_count + test_count
+
+print(f"✓ Train set:      {train_count:,} rows ({train_count/total*100:.0f}%)")
+print(f"✓ Validation set: {val_count:,} rows ({val_count/total*100:.0f}%)")
+print(f"✓ Test set:       {test_count:,} rows ({test_count/total*100:.0f}%)")
 
 # Cache for performance
 train_data.cache()
+val_data.cache()
 test_data.cache()
 
 print("\n" + "="*60)
@@ -133,19 +163,35 @@ for model_name, model in models:
     print("  Fitting model...")
     trained_model = pipeline.fit(train_data)
 
-    # Predict on test
+    # Predict on all sets
     print("  Making predictions...")
-    predictions = trained_model.transform(test_data)
+    train_preds = trained_model.transform(train_data)
+    val_preds = trained_model.transform(val_data)
+    test_preds = trained_model.transform(test_data)
 
-    # Calculate metrics
-    rmse = rmse_evaluator.evaluate(predictions)
-    mae = mae_evaluator.evaluate(predictions)
-    r2 = r2_evaluator.evaluate(predictions)
+    # Calculate metrics for each set
+    train_rmse = rmse_evaluator.evaluate(train_preds)
+    val_rmse = rmse_evaluator.evaluate(val_preds)
+    test_rmse = rmse_evaluator.evaluate(test_preds)
+
+    train_mae = mae_evaluator.evaluate(train_preds)
+    val_mae = mae_evaluator.evaluate(val_preds)
+    test_mae = mae_evaluator.evaluate(test_preds)
+
+    train_r2 = r2_evaluator.evaluate(train_preds)
+    val_r2 = r2_evaluator.evaluate(val_preds)
+    test_r2 = r2_evaluator.evaluate(test_preds)
 
     print(f"\n{model_name} Results:")
-    print(f"  RMSE: {rmse:.4f}")
-    print(f"  MAE:  {mae:.4f}")
-    print(f"  R²:   {r2:.4f}")
+    print(f"  {'Set':<12} {'RMSE':<10} {'MAE':<10} {'R²':<10}")
+    print(f"  {'-'*42}")
+    print(f"  {'Train':<12} {train_rmse:<10.4f} {train_mae:<10.4f} {train_r2:<10.4f}")
+    print(f"  {'Validation':<12} {val_rmse:<10.4f} {val_mae:<10.4f} {val_r2:<10.4f}")
+    print(f"  {'Test':<12} {test_rmse:<10.4f} {test_mae:<10.4f} {test_r2:<10.4f}")
+
+    overfit_gap = train_rmse - val_rmse
+    if abs(overfit_gap) > 0.1:
+        print(f"  ** Overfitting detected: train-val RMSE gap = {overfit_gap:.4f}")
 
     # Save model
     model_path = f"{MODELS_PATH}/{model_name.lower().replace(' ', '_')}"
@@ -154,23 +200,25 @@ for model_name, model in models:
 
     results.append({
         'model': model_name,
-        'rmse': rmse,
-        'mae': mae,
-        'r2': r2
+        'train_rmse': train_rmse, 'val_rmse': val_rmse, 'test_rmse': test_rmse,
+        'train_mae': train_mae, 'val_mae': val_mae, 'test_mae': test_mae,
+        'train_r2': train_r2, 'val_r2': val_r2, 'test_r2': test_r2,
     })
 
 # Print comparison
 print("\n" + "="*60)
-print("MODEL COMPARISON")
+print("MODEL COMPARISON (Train / Validation / Test)")
 print("="*60)
-print(f"\n{'Model':<25} {'RMSE':<10} {'MAE':<10} {'R²':<10}")
-print("-" * 60)
+print(f"\n{'Model':<25} {'Train RMSE':<12} {'Val RMSE':<12} {'Test RMSE':<12} {'Val R²':<10}")
+print("-" * 75)
 for r in results:
-    print(f"{r['model']:<25} {r['rmse']:<10.4f} {r['mae']:<10.4f} {r['r2']:<10.4f}")
+    print(f"{r['model']:<25} {r['train_rmse']:<12.4f} {r['val_rmse']:<12.4f} {r['test_rmse']:<12.4f} {r['val_r2']:<10.4f}")
 
-# Find best model
-best_model = min(results, key=lambda x: x['rmse'])
-print(f"\n🏆 Best model (lowest RMSE): {best_model['model']}")
+# Find best model by validation RMSE
+best_model = min(results, key=lambda x: x['val_rmse'])
+print(f"\nBest model (lowest Validation RMSE): {best_model['model']}")
+print(f"  Val RMSE:  {best_model['val_rmse']:.4f}")
+print(f"  Test RMSE: {best_model['test_rmse']:.4f}")
 
 # Save results summary
 from pyspark.sql import Row

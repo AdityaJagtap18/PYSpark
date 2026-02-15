@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Evaluation script - loads all trained models and generates CSV outputs
+Uses same stratified train/val/test split as training
 """
 import numpy as np
 import pandas as pd
 import pickle
-import os
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
@@ -16,7 +16,7 @@ users = pd.read_csv("data/hnm/processed/customers_features.csv", dtype={"custome
 tx = pd.read_csv("data/hnm/processed/transactions_sample.csv",
                  dtype={"customer_id": str, "article_id": str})
 
-# Recreate the same train/test split
+# Recreate the same stratified train/val/test split
 purchase_counts = tx.groupby(["customer_id", "article_id"]).size().reset_index(name="purchase_count")
 data = purchase_counts.merge(items, on="article_id", how="left")
 data = data.merge(users, on="customer_id", how="left")
@@ -30,11 +30,19 @@ y = data["purchase_count"]
 # Keep the IDs for output
 ids_df = data[["customer_id", "article_id"]]
 
-X_train, X_test, y_train, y_test, ids_train, ids_test = train_test_split(
-    X, y, ids_df, test_size=0.2, random_state=42
+# Stratified 3-way split matching training script
+strata = pd.cut(y, bins=[-np.inf, 1, 2, 5, np.inf], labels=[0, 1, 2, 3])
+
+X_train, X_temp, y_train, y_temp, ids_train, ids_temp, strata_train, strata_temp = train_test_split(
+    X, y, ids_df, strata, test_size=0.4, random_state=42, stratify=strata
+)
+X_val, X_test, y_val, y_test, ids_val, ids_test = train_test_split(
+    X_temp, y_temp, ids_temp, test_size=0.5, random_state=42, stratify=strata_temp
 )
 
-print(f"Test set size: {len(X_test):,} samples")
+print(f"Train set size:      {len(X_train):,} samples")
+print(f"Validation set size: {len(X_val):,} samples")
+print(f"Test set size:       {len(X_test):,} samples")
 
 # Find all model files
 model_dir = Path("data/hnm/models")
@@ -74,39 +82,41 @@ for model_file in sorted(model_files):
     with open(model_file, "rb") as f:
         model = pickle.load(f)
 
-    # Make predictions
+    # Make predictions on all sets
     print("Making predictions...")
     y_pred_train = model.predict(X_train)
+    y_pred_val = model.predict(X_val)
     y_pred_test = model.predict(X_test)
 
-    # Calculate metrics for both train and test sets
+    # Calculate metrics for all sets
     train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
     train_mae = mean_absolute_error(y_train, y_pred_train)
     train_r2 = r2_score(y_train, y_pred_train)
+
+    val_rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+    val_mae = mean_absolute_error(y_val, y_pred_val)
+    val_r2 = r2_score(y_val, y_pred_val)
 
     test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
     test_mae = mean_absolute_error(y_test, y_pred_test)
     test_r2 = r2_score(y_test, y_pred_test)
 
-    # Calculate additional metrics
     try:
         test_mape = mean_absolute_percentage_error(y_test, y_pred_test)
     except:
         test_mape = np.nan
 
-    print(f"\nTraining Set Metrics:")
-    print(f"  RMSE: {train_rmse:.4f}")
-    print(f"  MAE:  {train_mae:.4f}")
-    print(f"  R²:   {train_r2:.4f}")
+    print(f"\n  {'Set':<12} {'RMSE':<10} {'MAE':<10} {'R²':<10}")
+    print(f"  {'-'*42}")
+    print(f"  {'Train':<12} {train_rmse:<10.4f} {train_mae:<10.4f} {train_r2:<10.4f}")
+    print(f"  {'Validation':<12} {val_rmse:<10.4f} {val_mae:<10.4f} {val_r2:<10.4f}")
+    print(f"  {'Test':<12} {test_rmse:<10.4f} {test_mae:<10.4f} {test_r2:<10.4f}")
 
-    print(f"\nTest Set Metrics:")
-    print(f"  RMSE: {test_rmse:.4f}")
-    print(f"  MAE:  {test_mae:.4f}")
-    print(f"  R²:   {test_r2:.4f}")
-    if not np.isnan(test_mape):
-        print(f"  MAPE: {test_mape:.4f}")
+    overfit_gap = train_rmse - val_rmse
+    if abs(overfit_gap) > 0.1:
+        print(f"  ** Overfitting detected: train-val RMSE gap = {overfit_gap:.4f}")
 
-    # Save predictions to CSV
+    # Save predictions to CSV (test set)
     predictions_df = ids_test.copy()
     predictions_df["actual"] = y_test.values
     predictions_df["predicted"] = y_pred_test
@@ -123,11 +133,14 @@ for model_file in sorted(model_files):
         "train_rmse": train_rmse,
         "train_mae": train_mae,
         "train_r2": train_r2,
+        "val_rmse": val_rmse,
+        "val_mae": val_mae,
+        "val_r2": val_r2,
         "test_rmse": test_rmse,
         "test_mae": test_mae,
         "test_r2": test_r2,
         "test_mape": test_mape,
-        "overfitting": train_rmse - test_rmse,  # negative means worse on test
+        "overfitting_gap": train_rmse - val_rmse,
     })
 
 # Save metrics summary to CSV
@@ -136,7 +149,7 @@ print("SAVING METRICS SUMMARY")
 print("="*60)
 
 metrics_df = pd.DataFrame(all_metrics)
-metrics_df = metrics_df.sort_values("test_rmse")  # Sort by best test RMSE
+metrics_df = metrics_df.sort_values("val_rmse")  # Sort by best validation RMSE
 
 metrics_file = output_dir / "model_metrics_summary.csv"
 metrics_df.to_csv(metrics_file, index=False)
@@ -144,18 +157,19 @@ print(f"\n✓ Metrics summary saved → {metrics_file}")
 
 # Print comparison table
 print("\n" + "="*60)
-print("MODEL COMPARISON (sorted by Test RMSE)")
+print("MODEL COMPARISON (sorted by Validation RMSE)")
 print("="*60)
-print(f"\n{'Model':<30} {'Test RMSE':<12} {'Test MAE':<12} {'Test R²':<12}")
-print("-" * 70)
+print(f"\n{'Model':<30} {'Train RMSE':<12} {'Val RMSE':<12} {'Test RMSE':<12} {'Val R²':<10}")
+print("-" * 80)
 for _, row in metrics_df.iterrows():
-    print(f"{row['model']:<30} {row['test_rmse']:<12.4f} {row['test_mae']:<12.4f} {row['test_r2']:<12.4f}")
+    print(f"{row['model']:<30} {row['train_rmse']:<12.4f} {row['val_rmse']:<12.4f} {row['test_rmse']:<12.4f} {row['val_r2']:<10.4f}")
 
-# Identify best model
+# Identify best model by validation RMSE
 best_model = metrics_df.iloc[0]
-print(f"\n🏆 Best Model: {best_model['model']}")
+print(f"\nBest Model (by Validation RMSE): {best_model['model']}")
+print(f"   Val RMSE:  {best_model['val_rmse']:.4f}")
 print(f"   Test RMSE: {best_model['test_rmse']:.4f}")
-print(f"   Test R²:   {best_model['test_r2']:.4f}")
+print(f"   Val R²:    {best_model['val_r2']:.4f}")
 
 print("\n" + "="*60)
 print("OUTPUTS GENERATED:")

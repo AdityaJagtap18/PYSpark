@@ -137,9 +137,9 @@ def create_spark():
     return (
         SparkSession.builder
         .appName("HNM-BigData")
-        .config("spark.sql.shuffle.partitions", "96")
-        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "12g"))
-        .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "12g"))
+        .config("spark.sql.shuffle.partitions", "10")
+        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "4g"))
+        .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "4g"))
         .config("spark.memory.fraction", "0.6")
         .config("spark.memory.storageFraction", "0.3")
         .config("spark.sql.execution.arrow.pyspark.enabled", "false")

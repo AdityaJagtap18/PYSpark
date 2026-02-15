@@ -15,8 +15,9 @@ from pathlib import Path
 print("Initializing Spark Session...")
 spark = SparkSession.builder \
     .appName("HnM_Model_Evaluation") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.sql.shuffle.partitions", "10") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -63,10 +64,28 @@ assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handle
 data_assembled = assembler.transform(data_filled).select("customer_id", "article_id", "features", "purchase_count")
 data_final = data_assembled.withColumnRenamed("purchase_count", "label")
 
-# Split
-train_data, test_data = data_final.randomSplit([0.8, 0.2], seed=42)
+# Stratified 3-way split matching training script
+data_final = data_final.withColumn(
+    "strata",
+    when(col("label") <= 1, lit(0))
+    .when(col("label") <= 2, lit(1))
+    .when(col("label") <= 5, lit(2))
+    .otherwise(lit(3))
+)
 
-print(f"✓ Test set: {test_data.count():,} rows")
+train_data = data_final.sampleBy("strata", fractions={0: 0.6, 1: 0.6, 2: 0.6, 3: 0.6}, seed=42)
+remaining = data_final.subtract(train_data)
+val_data = remaining.sampleBy("strata", fractions={0: 0.5, 1: 0.5, 2: 0.5, 3: 0.5}, seed=42)
+test_data = remaining.subtract(val_data)
+
+train_data = train_data.drop("strata")
+val_data = val_data.drop("strata")
+test_data = test_data.drop("strata")
+data_final = data_final.drop("strata")
+
+print(f"✓ Train set:      {train_data.count():,} rows")
+print(f"✓ Validation set: {val_data.count():,} rows")
+print(f"✓ Test set:       {test_data.count():,} rows")
 
 # Find trained models
 model_dirs = [d for d in Path(MODELS_PATH).iterdir()
@@ -96,29 +115,34 @@ for model_dir in sorted(model_dirs):
         # Load model
         model = PipelineModel.load(str(model_dir))
 
-        # Predictions
+        # Predictions on all sets
         print("  Making predictions...")
         train_preds = model.transform(train_data)
+        val_preds = model.transform(val_data)
         test_preds = model.transform(test_data)
 
-        # Calculate metrics
+        # Calculate metrics for all sets
         train_rmse = rmse_evaluator.evaluate(train_preds)
         train_mae = mae_evaluator.evaluate(train_preds)
         train_r2 = r2_evaluator.evaluate(train_preds)
+
+        val_rmse = rmse_evaluator.evaluate(val_preds)
+        val_mae = mae_evaluator.evaluate(val_preds)
+        val_r2 = r2_evaluator.evaluate(val_preds)
 
         test_rmse = rmse_evaluator.evaluate(test_preds)
         test_mae = mae_evaluator.evaluate(test_preds)
         test_r2 = r2_evaluator.evaluate(test_preds)
 
-        print(f"\n  Training Set:")
-        print(f"    RMSE: {train_rmse:.4f}")
-        print(f"    MAE:  {train_mae:.4f}")
-        print(f"    R²:   {train_r2:.4f}")
+        print(f"\n  {'Set':<12} {'RMSE':<10} {'MAE':<10} {'R²':<10}")
+        print(f"  {'-'*42}")
+        print(f"  {'Train':<12} {train_rmse:<10.4f} {train_mae:<10.4f} {train_r2:<10.4f}")
+        print(f"  {'Validation':<12} {val_rmse:<10.4f} {val_mae:<10.4f} {val_r2:<10.4f}")
+        print(f"  {'Test':<12} {test_rmse:<10.4f} {test_mae:<10.4f} {test_r2:<10.4f}")
 
-        print(f"\n  Test Set:")
-        print(f"    RMSE: {test_rmse:.4f}")
-        print(f"    MAE:  {test_mae:.4f}")
-        print(f"    R²:   {test_r2:.4f}")
+        overfit_gap = train_rmse - val_rmse
+        if abs(overfit_gap) > 0.1:
+            print(f"  ** Overfitting detected: train-val RMSE gap = {overfit_gap:.4f}")
 
         # Save predictions
         pred_output = test_preds.select(
@@ -143,10 +167,13 @@ for model_dir in sorted(model_dirs):
             "train_rmse": float(train_rmse),
             "train_mae": float(train_mae),
             "train_r2": float(train_r2),
+            "val_rmse": float(val_rmse),
+            "val_mae": float(val_mae),
+            "val_r2": float(val_r2),
             "test_rmse": float(test_rmse),
             "test_mae": float(test_mae),
             "test_r2": float(test_r2),
-            "overfitting": float(test_rmse - train_rmse)
+            "overfitting_gap": float(train_rmse - val_rmse)
         })
 
     except Exception as e:
@@ -168,21 +195,22 @@ metrics_df.coalesce(1).write.mode("overwrite") \
 print(f"\n✓ Metrics saved → {EVAL_PATH}/model_metrics_summary")
 
 # Print comparison
-metrics_sorted = sorted(all_metrics, key=lambda x: x['test_rmse'])
+metrics_sorted = sorted(all_metrics, key=lambda x: x['val_rmse'])
 
 print("\n" + "="*60)
-print("MODEL COMPARISON (sorted by Test RMSE)")
+print("MODEL COMPARISON (sorted by Validation RMSE)")
 print("="*60)
-print(f"\n{'Model':<30} {'Test RMSE':<12} {'Test MAE':<12} {'Test R²':<12}")
-print("-" * 70)
+print(f"\n{'Model':<30} {'Train RMSE':<12} {'Val RMSE':<12} {'Test RMSE':<12} {'Val R²':<10}")
+print("-" * 80)
 for m in metrics_sorted:
-    print(f"{m['model']:<30} {m['test_rmse']:<12.4f} {m['test_mae']:<12.4f} {m['test_r2']:<12.4f}")
+    print(f"{m['model']:<30} {m['train_rmse']:<12.4f} {m['val_rmse']:<12.4f} {m['test_rmse']:<12.4f} {m['val_r2']:<10.4f}")
 
 if metrics_sorted:
     best = metrics_sorted[0]
-    print(f"\n🏆 Best Model: {best['model']}")
+    print(f"\nBest Model (by Validation RMSE): {best['model']}")
+    print(f"   Val RMSE:  {best['val_rmse']:.4f}")
     print(f"   Test RMSE: {best['test_rmse']:.4f}")
-    print(f"   Test R²:   {best['test_r2']:.4f}")
+    print(f"   Val R²:    {best['val_r2']:.4f}")
 
 spark.stop()
 print("\n✓ EVALUATION COMPLETE!")

@@ -12,10 +12,10 @@ import os
 print("Initializing Spark Session...")
 spark = SparkSession.builder \
     .appName("HnM_Data_Ingestion") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
-    .config("spark.driver.maxResultSize", "4g") \
-    .config("spark.sql.shuffle.partitions", "100") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.maxResultSize", "2g") \
+    .config("spark.sql.shuffle.partitions", "10") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
